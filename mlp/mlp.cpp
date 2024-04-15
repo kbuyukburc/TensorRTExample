@@ -1,5 +1,6 @@
     #include "NvInfer.h"    // TensorRT library
 #include "iostream"     // Standard input/output library
+#include "gelu.h"
 #include "logging.h"    // logging file -- by NVIDIA
 #include <map>          // for weight maps
 #include <fstream>      // for file-handling
@@ -11,7 +12,7 @@ using namespace nvinfer1;
 // Logger from TRT API
 static Logger gLogger;
 
-const int INPUT_SIZE = 1;
+const int INPUT_SIZE = 2;
 const int OUTPUT_SIZE = 1;
 
 /** ////////////////////////////
@@ -61,6 +62,16 @@ std::map<std::string, Weights> loadWeights(const std::string file) {
     return weightMap;
 }
 
+ITensor* gelu(INetworkDefinition *m_Network,ITensor *input)
+{
+    auto creator = getPluginRegistry()->getPluginCreator("geluLayer_TRT", "1");
+    const PluginFieldCollection* pluginData = creator->getFieldNames();
+    IPluginV2 *pluginObj = creator->createPlugin("gelu", pluginData);
+    ITensor* inputTensors[] = {input};
+    auto g = m_Network->addPluginV2(inputTensors, 1, *pluginObj);
+    return g->getOutput(0);
+}
+
 ICudaEngine *createMLPEngine(unsigned int maxBatchSize, IBuilder *builder, IBuilderConfig *config, DataType dt) {
     /**
      * Create Multi-Layer Perceptron using the TRT Builder and Configurations
@@ -81,20 +92,27 @@ ICudaEngine *createMLPEngine(unsigned int maxBatchSize, IBuilder *builder, IBuil
     INetworkDefinition *network = builder->createNetworkV2(0U);
 
     // Create an input with proper *name
-    ITensor *data = network->addInput("data", DataType::kFLOAT, Dims3{1, 1, 1});
+    ITensor *data = network->addInput("data", DataType::kFLOAT, Dims3{2, 1, 1});
     assert(data);
 
-    // Add layer for MLP
+    // Add layer for MLP    
     IFullyConnectedLayer *fc1 = network->addFullyConnected(*data, 1,
                                                            weightMap["linear.weight"],
                                                            weightMap["linear.bias"]);
     assert(fc1);
+    // Add layer for Relu    
+    // IActivationLayer* relu1 = network->addActivation(*fc1->getOutput(0), ActivationType::kRELU);
+    // assert(relu1);
+    // Add layer for Gelu
+    auto gelu1 = ::gelu(network, fc1->getOutput(0));    
 
     // set output with *name
-    fc1->getOutput(0)->setName("out");
+    // relu1->getOutput(0)->setName("out");
+    gelu1->setName("out");
 
     // mark the output
-    network->markOutput(*fc1->getOutput(0));
+    network->markOutput(*gelu1);
+    // network->markOutput(*relu1->getOutput(0));
 
     // Set configurations
     builder->setMaxBatchSize(1);
@@ -198,11 +216,14 @@ void doInference(IExecutionContext &context, float *input, float *output, int ba
     // Note that indices are guaranteed to be less than IEngine::getNbBindings()
     const int inputIndex = engine.getBindingIndex("data");
     const int outputIndex = engine.getBindingIndex("out");
+    std::cout << inputIndex << std::endl;
+    std::cout << outputIndex << std::endl;
 
     // Create GPU buffers on device -- allocate memory for input and output
     cudaMalloc(&buffers[inputIndex], batchSize * INPUT_SIZE * sizeof(float));
     cudaMalloc(&buffers[outputIndex], batchSize * OUTPUT_SIZE * sizeof(float));
-
+    std::cout << buffers[inputIndex] << std::endl;
+    std::cout << buffers[outputIndex] << std::endl;
     // create CUDA stream for simultaneous CUDA operations
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -261,9 +282,9 @@ void performInference() {
     assert(context != nullptr);
 
     float out[1];  // array for output
-    float data[1]; // array for input
+    float data[2]; // array for input
     for (float &i: data)
-        i = 12.0;   // put any value for input
+        i = 2.0;   // put any value for input
 
     // time the execution
     auto start = std::chrono::system_clock::now();
